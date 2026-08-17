@@ -2,8 +2,8 @@ name: Escaneo de mercado
 
 on:
   schedule:
-    # Cada 4 horas (UTC). Ajusta según tu zona horaria.
-    - cron: "0 */4 * * *"
+    # Cada 15 minutos (UTC). Ajusta según tu zona horaria.
+    - cron: "*/15 * * * *"
   workflow_dispatch: # Permite ejecutar manualmente desde GitHub
 
 jobs:
