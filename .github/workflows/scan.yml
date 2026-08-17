@@ -1,0 +1,32 @@
+name: Escaneo de mercado
+
+on:
+  schedule:
+    # Cada 4 horas (UTC). Ajusta según tu zona horaria.
+    - cron: "0 */4 * * *"
+  workflow_dispatch: # Permite ejecutar manualmente desde GitHub
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar bot
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          FUENTE_DATOS: yfinance
+        run: python bot.py

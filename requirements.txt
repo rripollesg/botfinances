@@ -1,0 +1,9 @@
+pandas
+yfinance
+requests
+python-dotenv
+ddgs
+langchain-groq
+langchain-ollama
+langchain-core
+MetaTrader5
