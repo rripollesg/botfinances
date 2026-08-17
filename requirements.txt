@@ -6,4 +6,3 @@ ddgs
 langchain-groq
 langchain-ollama
 langchain-core
-MetaTrader5
