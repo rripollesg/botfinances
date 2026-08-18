@@ -495,14 +495,15 @@ def evaluar_activo(activo, llm):
     df = preparar_dataframe_analisis(df)
     estructura = analizar_estructura_precio(df)
 
-    precio_actual = round(float(df["Close"].iloc[-1]), 2)
+    precio_valido = obtener_ultimo_valor_valido(df["Close"])
     rsi_valido = obtener_ultimo_valor_valido(df["RSI"])
     sma_200_valido = obtener_ultimo_valor_valido(df["SMA_200"])
 
-    if rsi_valido is None or sma_200_valido is None:
+    if precio_valido is None or rsi_valido is None or sma_200_valido is None:
         print(f"  [-] Indicadores incompletos para {ticker_symbol}.")
         return
 
+    precio_actual = round(precio_valido, 2)
     rsi_actual = round(rsi_valido, 2)
     sma_200_actual = round(sma_200_valido, 2)
 
