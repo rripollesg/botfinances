@@ -1,5 +1,6 @@
 import html
 import os
+import sys
 import time
 
 import pandas as pd
@@ -24,6 +25,12 @@ MT5_SUFFIX = os.getenv("MT5_SUFFIX", "")
 
 RSI_OVERSOLD = 35
 RSI_OVERBOUGHT = 70
+BACKTEST_INITIAL_CAPITAL = float(os.getenv("BACKTEST_INITIAL_CAPITAL", "10000"))
+BACKTEST_COMMISSION_PCT = float(os.getenv("BACKTEST_COMMISSION_PCT", "0.001"))
+BACKTEST_SPREAD_PCT = float(os.getenv("BACKTEST_SPREAD_PCT", "0.0005"))
+BACKTEST_STOP_LOSS_PCT = float(os.getenv("BACKTEST_STOP_LOSS_PCT", "0.08"))
+BACKTEST_TAKE_PROFIT_PCT = float(os.getenv("BACKTEST_TAKE_PROFIT_PCT", "0.15"))
+BACKTEST_OUTPUT_DIR = os.getenv("BACKTEST_OUTPUT_DIR", "backtests")
 
 PORTAFOLIO = [
     # Tech / IA (núcleo)
@@ -118,6 +125,111 @@ def calcular_rsi(data, window=14):
     rs = avg_gain / avg_loss.replace(0, float("nan"))
     rsi = 100 - (100 / (1 + rs))
     return rsi
+
+
+def extraer_pivots(series, kind, window=2):
+    """Extrae pivots locales recientes de una serie de precios."""
+    valores = []
+    for idx in range(window, len(series) - window):
+        centro = series.iloc[idx]
+        if pd.isna(centro):
+            continue
+        izquierda = series.iloc[idx - window : idx]
+        derecha = series.iloc[idx + 1 : idx + window + 1]
+        if kind == "high" and centro >= izquierda.max() and centro >= derecha.max():
+            valores.append(float(centro))
+        elif kind == "low" and centro <= izquierda.min() and centro <= derecha.min():
+            valores.append(float(centro))
+    return valores
+
+
+def analizar_estructura_precio(df):
+    """Detecta higher highs/lows y lower highs/lows usando pivots recientes."""
+    pivot_highs = extraer_pivots(df["High"], kind="high")
+    pivot_lows = extraer_pivots(df["Low"], kind="low")
+
+    hh = len(pivot_highs) >= 2 and pivot_highs[-1] > pivot_highs[-2]
+    lh = len(pivot_highs) >= 2 and pivot_highs[-1] < pivot_highs[-2]
+    hl = len(pivot_lows) >= 2 and pivot_lows[-1] > pivot_lows[-2]
+    ll = len(pivot_lows) >= 2 and pivot_lows[-1] < pivot_lows[-2]
+
+    if hh and hl:
+        estructura = "ALCISTA"
+    elif lh and ll:
+        estructura = "BAJISTA"
+    elif hh or hl:
+        estructura = "ALCISTA PARCIAL"
+    elif lh or ll:
+        estructura = "BAJISTA PARCIAL"
+    else:
+        estructura = "NEUTRA"
+
+    etiquetas = []
+    if hh:
+        etiquetas.append("Higher Highs")
+    if hl:
+        etiquetas.append("Higher Lows")
+    if lh:
+        etiquetas.append("Lower Highs")
+    if ll:
+        etiquetas.append("Lower Lows")
+
+    return {
+        "estructura": estructura,
+        "hh": hh,
+        "hl": hl,
+        "lh": lh,
+        "ll": ll,
+        "texto": ", ".join(etiquetas) if etiquetas else "Sin patrón claro",
+    }
+
+
+def evaluar_senal(precio_actual, rsi_actual, sma_200_actual, estructura):
+    """Evalúa la señal combinando RSI, tendencia macro y estructura."""
+    tendencia_alcista = precio_actual > sma_200_actual
+    texto_tendencia = "ALCISTA 🟢" if tendencia_alcista else "BAJISTA 🔴"
+
+    if rsi_actual <= RSI_OVERSOLD and tendencia_alcista and estructura["hh"] and estructura["hl"]:
+        return {
+            "estado": "🟢 COMPRA FUERTE (Higher Highs + Higher Lows en Tendencia Alcista)",
+            "texto_tendencia": texto_tendencia,
+            "enviar_alerta": True,
+        }
+    if rsi_actual <= RSI_OVERSOLD and tendencia_alcista and estructura["hl"]:
+        return {
+            "estado": "🟢 COMPRA CONFIRMADA (Sobreventa dentro de Tendencia Alcista)",
+            "texto_tendencia": texto_tendencia,
+            "enviar_alerta": True,
+        }
+    if rsi_actual >= RSI_OVERBOUGHT and (not tendencia_alcista) and estructura["lh"] and estructura["ll"]:
+        return {
+            "estado": "🔴 VENTA FUERTE (Lower Highs + Lower Lows en Tendencia Bajista)",
+            "texto_tendencia": texto_tendencia,
+            "enviar_alerta": True,
+        }
+    if rsi_actual >= RSI_OVERBOUGHT and (not tendencia_alcista) and estructura["lh"]:
+        return {
+            "estado": "🔴 VENTA/CORRECCIÓN (Sobrecompra dentro de Tendencia Bajista)",
+            "texto_tendencia": texto_tendencia,
+            "enviar_alerta": True,
+        }
+    if rsi_actual <= RSI_OVERSOLD and tendencia_alcista and not estructura["hl"]:
+        motivo = "Falta confirmación de higher lows para validar compra."
+    elif rsi_actual >= RSI_OVERBOUGHT and (not tendencia_alcista) and not estructura["lh"]:
+        motivo = "Falta confirmación de lower highs para validar venta."
+    elif rsi_actual <= RSI_OVERSOLD and not tendencia_alcista:
+        motivo = "RSI en sobreventa descartado por tendencia macro bajista."
+    elif rsi_actual >= RSI_OVERBOUGHT and tendencia_alcista:
+        motivo = "RSI en sobrecompra descartado por fuerza de tendencia alcista."
+    else:
+        motivo = f"RSI neutral ({rsi_actual}). Sin señal operativa."
+
+    return {
+        "estado": "",
+        "texto_tendencia": texto_tendencia,
+        "enviar_alerta": False,
+        "motivo": motivo,
+    }
 
 
 def buscar_noticias_recientes(query, max_results=3):
@@ -286,6 +398,62 @@ def enviar_telegram(mensaje):
         print(f"  [!] Error enviando mensaje a Telegram: {e}")
 
 
+def preparar_dataframe_analisis(df):
+    """Añade indicadores base al dataframe."""
+    df = df.copy()
+    df["RSI"] = calcular_rsi(df, window=14)
+    df["SMA_200"] = df["Close"].rolling(window=200).mean()
+    return df
+
+
+def calcular_rendimiento_neto(precio_entrada, precio_salida):
+    """Aplica spread y comisiones a una operación larga."""
+    entrada_efectiva = precio_entrada * (1 + BACKTEST_SPREAD_PCT / 2) * (1 + BACKTEST_COMMISSION_PCT)
+    salida_efectiva = precio_salida * (1 - BACKTEST_SPREAD_PCT / 2) * (1 - BACKTEST_COMMISSION_PCT)
+    return (salida_efectiva / entrada_efectiva) - 1
+
+
+def exportar_resultados_backtest(resultados):
+    """Exporta resumen y trades a CSV."""
+    os.makedirs(BACKTEST_OUTPUT_DIR, exist_ok=True)
+
+    resumen_rows = []
+    trades_rows = []
+    for resultado in resultados:
+        resumen_rows.append(
+            {
+                "ticker": resultado["ticker"],
+                "nombre": resultado["nombre"],
+                "fuente_datos": resultado["fuente_datos"],
+                "capital_final": resultado["capital_final"],
+                "rentabilidad_total": resultado["rentabilidad_total"],
+                "numero_trades": resultado["numero_trades"],
+                "win_rate": resultado["win_rate"],
+                "ganadoras": resultado["ganadoras"],
+                "perdedoras": resultado["perdedoras"],
+            }
+        )
+        for trade in resultado["trades"]:
+            trades_rows.append(
+                {
+                    "ticker": resultado["ticker"],
+                    "nombre": resultado["nombre"],
+                    "entrada": trade["entrada"],
+                    "salida": trade["salida"],
+                    "precio_entrada": trade["precio_entrada"],
+                    "precio_salida": trade["precio_salida"],
+                    "rendimiento_pct": round(trade["rendimiento"] * 100, 2),
+                    "motivo_salida": trade["estado_salida"],
+                }
+            )
+
+    resumen_path = os.path.join(BACKTEST_OUTPUT_DIR, "resumen_backtest.csv")
+    trades_path = os.path.join(BACKTEST_OUTPUT_DIR, "trades_backtest.csv")
+    pd.DataFrame(resumen_rows).to_csv(resumen_path, index=False)
+    pd.DataFrame(trades_rows).to_csv(trades_path, index=False)
+    return resumen_path, trades_path
+
+
 def evaluar_activo(activo, llm):
     ticker_symbol = activo["ticker"]
     nombre = activo["nombre"]
@@ -301,8 +469,8 @@ def evaluar_activo(activo, llm):
 
     print(f"  [i] Fuente de datos: {fuente_datos}")
 
-    df["RSI"] = calcular_rsi(df, window=14)
-    df["SMA_200"] = df["Close"].rolling(window=200).mean()
+    df = preparar_dataframe_analisis(df)
+    estructura = analizar_estructura_precio(df)
 
     precio_actual = round(float(df["Close"].iloc[-1]), 2)
     rsi_actual = round(float(df["RSI"].iloc[-1]), 2)
@@ -312,28 +480,19 @@ def evaluar_activo(activo, llm):
         print(f"  [-] Indicadores incompletos para {ticker_symbol}.")
         return
 
-    tendencia_alcista = precio_actual > sma_200_actual
-    texto_tendencia = "ALCISTA 🟢" if tendencia_alcista else "BAJISTA 🔴"
+    senal = evaluar_senal(precio_actual, rsi_actual, sma_200_actual, estructura)
+    texto_tendencia = senal["texto_tendencia"]
 
     print(
         f"  Precio: ${precio_actual} | SMA 200: ${sma_200_actual} ({texto_tendencia}) | RSI: {rsi_actual}"
     )
+    print(f"  Estructura: {estructura['estructura']} | {estructura['texto']}")
 
-    estado = ""
-    if rsi_actual <= RSI_OVERSOLD and tendencia_alcista:
-        estado = "🟢 COMPRA CONFIRMADA (Sobreventa dentro de Tendencia Alcista)"
-    elif rsi_actual >= RSI_OVERBOUGHT and not tendencia_alcista:
-        estado = "🔴 VENTA/CORRECCIÓN (Sobrecompra dentro de Tendencia Bajista)"
-    elif rsi_actual <= RSI_OVERSOLD and not tendencia_alcista:
-        print("  [-] Filtro: RSI en sobreventa descartado por tendencia macro bajista.")
-        return
-    elif rsi_actual >= RSI_OVERBOUGHT and tendencia_alcista:
-        print("  [-] Filtro: RSI en sobrecompra descartado por fuerza de tendencia alcista.")
-        return
-    else:
-        print(f"  [-] Filtro: RSI neutral ({rsi_actual}). Sin señal operativa.")
+    if not senal["enviar_alerta"]:
+        print(f"  [-] Filtro: {senal['motivo']}")
         return
 
+    estado = senal["estado"]
     print(f"  [+] SEÑAL DETECTADA: {estado}")
 
     query_busqueda = f"{nombre} {tipo} market news"
@@ -348,6 +507,7 @@ def evaluar_activo(activo, llm):
         - Precio Actual: ${precio_actual}
         - Tendencia Macro (SMA 200): ${sma_200_actual} ({texto_tendencia})
         - RSI (14): {rsi_actual}
+        - Estructura de precio: {estructura["estructura"]} ({estructura["texto"]})
         - Diagnóstico técnico: {estado}
 
         Noticias recientes sobre {nombre}:
@@ -373,6 +533,7 @@ def evaluar_activo(activo, llm):
 💵 <b>Precio Actual:</b> ${precio_actual}
 📈 <b>SMA 200 (Macro):</b> ${sma_200_actual} ({texto_tendencia})
 📊 <b>RSI (14):</b> {rsi_actual}
+🧭 <b>Estructura:</b> {html.escape(estructura["estructura"])} ({html.escape(estructura["texto"])})
 
 💡 <b>Análisis IA + Noticias:</b>
 {analisis_ia_seguro}
@@ -382,6 +543,170 @@ def evaluar_activo(activo, llm):
     """
 
     enviar_telegram(mensaje_telegram.strip())
+
+
+def backtest_activo(activo, capital_inicial=BACKTEST_INITIAL_CAPITAL):
+    """Simula entradas y salidas sobre histórico diario."""
+    ticker_symbol = activo["ticker"]
+    nombre = activo["nombre"]
+    tipo = activo["tipo"]
+
+    df, fuente_datos = obtener_datos_historicos(ticker_symbol, tipo)
+    if df is None:
+        print(f"  [-] Backtest omitido para {ticker_symbol}: sin datos.")
+        return None
+
+    df = preparar_dataframe_analisis(df)
+    capital = capital_inicial
+    en_posicion = False
+    precio_entrada = 0.0
+    fecha_entrada = None
+    stop_loss = None
+    take_profit = None
+    trades = []
+
+    for idx in range(200, len(df)):
+        ventana = df.iloc[: idx + 1].copy()
+        precio_actual = float(ventana["Close"].iloc[-1])
+        rsi_actual = ventana["RSI"].iloc[-1]
+        sma_200_actual = ventana["SMA_200"].iloc[-1]
+
+        if pd.isna(rsi_actual) or pd.isna(sma_200_actual):
+            continue
+
+        estructura = analizar_estructura_precio(ventana)
+        senal = evaluar_senal(precio_actual, float(rsi_actual), float(sma_200_actual), estructura)
+        estado = senal["estado"]
+
+        es_compra = estado.startswith("🟢")
+        es_venta = estado.startswith("🔴")
+
+        if not en_posicion and es_compra:
+            en_posicion = True
+            precio_entrada = precio_actual
+            fecha_entrada = ventana.index[-1]
+            stop_loss = precio_entrada * (1 - BACKTEST_STOP_LOSS_PCT)
+            take_profit = precio_entrada * (1 + BACKTEST_TAKE_PROFIT_PCT)
+        elif en_posicion:
+            high_actual = float(ventana["High"].iloc[-1])
+            low_actual = float(ventana["Low"].iloc[-1])
+            precio_salida = None
+            estado_salida = None
+
+            if low_actual <= stop_loss:
+                precio_salida = stop_loss
+                estado_salida = "Stop Loss"
+            elif high_actual >= take_profit:
+                precio_salida = take_profit
+                estado_salida = "Take Profit"
+            elif es_venta:
+                precio_salida = precio_actual
+                estado_salida = estado
+
+            if precio_salida is None:
+                continue
+
+            rendimiento = calcular_rendimiento_neto(precio_entrada, precio_salida)
+            capital *= 1 + rendimiento
+            trades.append(
+                {
+                    "entrada": fecha_entrada,
+                    "salida": ventana.index[-1],
+                    "precio_entrada": precio_entrada,
+                    "precio_salida": precio_salida,
+                    "rendimiento": rendimiento,
+                    "estado_salida": estado_salida,
+                }
+            )
+            en_posicion = False
+            precio_entrada = 0.0
+            fecha_entrada = None
+            stop_loss = None
+            take_profit = None
+
+    if en_posicion:
+        precio_final = float(df["Close"].iloc[-1])
+        rendimiento = calcular_rendimiento_neto(precio_entrada, precio_final)
+        capital *= 1 + rendimiento
+        trades.append(
+            {
+                "entrada": fecha_entrada,
+                "salida": df.index[-1],
+                "precio_entrada": precio_entrada,
+                "precio_salida": precio_final,
+                "rendimiento": rendimiento,
+                "estado_salida": "Cierre al final del backtest",
+            }
+        )
+
+    ganancias = [t for t in trades if t["rendimiento"] > 0]
+    perdidas = [t for t in trades if t["rendimiento"] <= 0]
+    rentabilidad_total = ((capital / capital_inicial) - 1) * 100
+    win_rate = (len(ganancias) / len(trades) * 100) if trades else 0.0
+
+    return {
+        "ticker": ticker_symbol,
+        "nombre": nombre,
+        "fuente_datos": fuente_datos,
+        "trades": trades,
+        "capital_final": round(capital, 2),
+        "rentabilidad_total": round(rentabilidad_total, 2),
+        "numero_trades": len(trades),
+        "win_rate": round(win_rate, 2),
+        "ganadoras": len(ganancias),
+        "perdedoras": len(perdidas),
+    }
+
+
+def ejecutar_backtest():
+    """Ejecuta un backtest simple sobre todo el portafolio."""
+    print("=== INICIANDO BACKTEST DEL PORTAFOLIO ===")
+    print(f"Fuente de datos configurada: {FUENTE_DATOS}")
+    print(
+        "Parámetros: "
+        f"capital=${BACKTEST_INITIAL_CAPITAL}, "
+        f"comisión={BACKTEST_COMMISSION_PCT * 100}%, "
+        f"spread={BACKTEST_SPREAD_PCT * 100}%, "
+        f"SL={BACKTEST_STOP_LOSS_PCT * 100}%, "
+        f"TP={BACKTEST_TAKE_PROFIT_PCT * 100}%"
+    )
+
+    resultados = []
+    for activo in PORTAFOLIO:
+        print(f"\nBacktesting {activo['nombre']} ({activo['ticker']})...")
+        resultado = backtest_activo(activo)
+        if not resultado:
+            continue
+
+        resultados.append(resultado)
+        print(
+            "  "
+            f"Trades: {resultado['numero_trades']} | "
+            f"Win rate: {resultado['win_rate']}% | "
+            f"Rentabilidad: {resultado['rentabilidad_total']}% | "
+            f"Capital final: ${resultado['capital_final']}"
+        )
+
+    if not resultados:
+        print("\n=== BACKTEST SIN RESULTADOS ===")
+        return
+
+    rentabilidad_media = sum(r["rentabilidad_total"] for r in resultados) / len(resultados)
+    total_trades = sum(r["numero_trades"] for r in resultados)
+    mejor = max(resultados, key=lambda r: r["rentabilidad_total"])
+    peor = min(resultados, key=lambda r: r["rentabilidad_total"])
+
+    print("\n=== RESUMEN BACKTEST ===")
+    print(f"Activos analizados: {len(resultados)}")
+    print(f"Trades totales: {total_trades}")
+    print(f"Rentabilidad media por activo: {round(rentabilidad_media, 2)}%")
+    print(
+        f"Mejor activo: {mejor['ticker']} ({mejor['rentabilidad_total']}%) | "
+        f"Peor activo: {peor['ticker']} ({peor['rentabilidad_total']}%)"
+    )
+    resumen_path, trades_path = exportar_resultados_backtest(resultados)
+    print(f"CSV resumen: {resumen_path}")
+    print(f"CSV trades: {trades_path}")
 
 
 def ejecutar_escaneo():
@@ -398,4 +723,7 @@ def ejecutar_escaneo():
 
 
 if __name__ == "__main__":
-    ejecutar_escaneo()
+    if len(sys.argv) > 1 and sys.argv[1].lower() == "backtest":
+        ejecutar_backtest()
+    else:
+        ejecutar_escaneo()
