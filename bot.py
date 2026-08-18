@@ -421,6 +421,14 @@ def preparar_dataframe_analisis(df):
     return df
 
 
+def obtener_ultimo_valor_valido(series):
+    """Devuelve el último valor no nulo de una serie."""
+    serie_valida = series.dropna()
+    if serie_valida.empty:
+        return None
+    return float(serie_valida.iloc[-1])
+
+
 def calcular_rendimiento_neto(precio_entrada, precio_salida):
     """Aplica spread y comisiones a una operación larga."""
     entrada_efectiva = precio_entrada * (1 + BACKTEST_SPREAD_PCT / 2) * (1 + BACKTEST_COMMISSION_PCT)
@@ -488,12 +496,15 @@ def evaluar_activo(activo, llm):
     estructura = analizar_estructura_precio(df)
 
     precio_actual = round(float(df["Close"].iloc[-1]), 2)
-    rsi_actual = round(float(df["RSI"].iloc[-1]), 2)
-    sma_200_actual = round(float(df["SMA_200"].iloc[-1]), 2)
+    rsi_valido = obtener_ultimo_valor_valido(df["RSI"])
+    sma_200_valido = obtener_ultimo_valor_valido(df["SMA_200"])
 
-    if pd.isna(rsi_actual) or pd.isna(sma_200_actual):
+    if rsi_valido is None or sma_200_valido is None:
         print(f"  [-] Indicadores incompletos para {ticker_symbol}.")
         return
+
+    rsi_actual = round(rsi_valido, 2)
+    sma_200_actual = round(sma_200_valido, 2)
 
     senal = evaluar_senal(precio_actual, rsi_actual, sma_200_actual, estructura)
     texto_tendencia = senal["texto_tendencia"]
