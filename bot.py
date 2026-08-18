@@ -122,8 +122,12 @@ def calcular_rsi(data, window=14):
     avg_gain = gain.ewm(alpha=1 / window, min_periods=window, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1 / window, min_periods=window, adjust=False).mean()
 
-    rs = avg_gain / avg_loss.replace(0, float("nan"))
+    avg_loss_safe = avg_loss.replace(0, float("nan"))
+    rs = avg_gain / avg_loss_safe
     rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
+    rsi = rsi.mask((avg_gain == 0) & (avg_loss > 0), 0.0)
+    rsi = rsi.mask((avg_gain == 0) & (avg_loss == 0), 50.0)
     return rsi
 
 
@@ -396,6 +400,17 @@ def enviar_telegram(mensaje):
         print("  [✓] Alerta enviada con éxito a Telegram.")
     except Exception as e:
         print(f"  [!] Error enviando mensaje a Telegram: {e}")
+
+
+def enviar_mensaje_prueba():
+    """Envía un mensaje simple para verificar Telegram sin depender de señales."""
+    mensaje = """
+🧪 <b>PRUEBA DE TELEGRAM</b>
+
+El bot está conectado correctamente y puede enviarte mensajes.
+Si estás viendo esto, la configuración de Telegram funciona.
+    """
+    enviar_telegram(mensaje.strip())
 
 
 def preparar_dataframe_analisis(df):
@@ -725,5 +740,7 @@ def ejecutar_escaneo():
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1].lower() == "backtest":
         ejecutar_backtest()
+    elif len(sys.argv) > 1 and sys.argv[1].lower() == "test-telegram":
+        enviar_mensaje_prueba()
     else:
         ejecutar_escaneo()

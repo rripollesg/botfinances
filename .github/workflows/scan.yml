@@ -4,7 +4,17 @@ on:
   schedule:
     # Cada 15 minutos (UTC)
     - cron: "*/15 * * * *"
-  workflow_dispatch: # Permite ejecutar manualmente desde GitHub
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Modo de ejecución"
+        required: true
+        default: "scan"
+        type: choice
+        options:
+          - scan
+          - test-telegram
+          - backtest
 
 jobs:
   scan:
@@ -29,4 +39,19 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           FUENTE_DATOS: yfinance
-        run: python bot.py
+        run: |
+          MODE="${{ github.event.inputs.mode }}"
+          if [ -z "$MODE" ]; then
+            MODE="scan"
+          fi
+
+          if [ "$MODE" = "scan" ]; then
+            python bot.py
+          elif [ "$MODE" = "test-telegram" ]; then
+            python bot.py test-telegram
+          elif [ "$MODE" = "backtest" ]; then
+            python bot.py backtest
+          else
+            echo "Modo no soportado: $MODE"
+            exit 1
+          fi
