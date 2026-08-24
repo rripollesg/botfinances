@@ -485,10 +485,26 @@ def evaluar_activo(activo, llm):
     print("\n--------------------------------------------------")
     print(f"Analizando [{tipo}] {nombre} ({ticker_symbol})...")
 
+    resumen = {
+        "ticker": ticker_symbol,
+        "nombre": nombre,
+        "tipo": tipo,
+        "ok": False,
+        "precio": None,
+        "rsi": None,
+        "sma_200": None,
+        "tendencia": "N/D",
+        "estructura": "N/D",
+        "motivo": "Sin datos",
+        "alerta": False,
+        "estado": "",
+    }
+
     df, fuente_datos = obtener_datos_historicos(ticker_symbol, tipo)
     if df is None:
         print(f"  [-] No se pudieron obtener datos para {ticker_symbol}.")
-        return
+        resumen["motivo"] = "Sin datos"
+        return resumen
 
     print(f"  [i] Fuente de datos: {fuente_datos}")
 
@@ -501,7 +517,8 @@ def evaluar_activo(activo, llm):
 
     if precio_valido is None or rsi_valido is None or sma_200_valido is None:
         print(f"  [-] Indicadores incompletos para {ticker_symbol}.")
-        return
+        resumen["motivo"] = "Indicadores incompletos"
+        return resumen
 
     precio_actual = round(precio_valido, 2)
     rsi_actual = round(rsi_valido, 2)
@@ -515,9 +532,23 @@ def evaluar_activo(activo, llm):
     )
     print(f"  Estructura: {estructura['estructura']} | {estructura['texto']}")
 
+    resumen.update(
+        {
+            "ok": True,
+            "precio": precio_actual,
+            "rsi": rsi_actual,
+            "sma_200": sma_200_actual,
+            "tendencia": texto_tendencia,
+            "estructura": estructura["estructura"],
+            "motivo": senal.get("motivo", "Señal operativa"),
+            "alerta": senal["enviar_alerta"],
+            "estado": senal["estado"],
+        }
+    )
+
     if not senal["enviar_alerta"]:
         print(f"  [-] Filtro: {senal['motivo']}")
-        return
+        return resumen
 
     estado = senal["estado"]
     print(f"  [+] SEÑAL DETECTADA: {estado}")
@@ -570,6 +601,50 @@ def evaluar_activo(activo, llm):
     """
 
     enviar_telegram(mensaje_telegram.strip())
+    return resumen
+
+
+def construir_resumen_escaneo(resultados):
+    """Construye un resumen compacto del escaneo para Telegram."""
+    total = len(resultados)
+    ok = [r for r in resultados if r.get("ok")]
+    alertas = [r for r in ok if r.get("alerta")]
+    sin_datos = [r for r in resultados if not r.get("ok")]
+
+    lineas = [
+        "📋 <b>RESUMEN DEL ESCANEO</b>",
+        f"Activos: {total} | Analizados: {len(ok)} | Señales: {len(alertas)}",
+        "",
+    ]
+
+    if alertas:
+        lineas.append("<b>Señales:</b>")
+        for r in alertas:
+            lineas.append(f"• {html.escape(r['ticker'])}: {html.escape(r['estado'])}")
+        lineas.append("")
+    else:
+        lineas.append("Sin señales de compra/venta en este escaneo.")
+        lineas.append("")
+
+    lineas.append("<b>Detalle:</b>")
+    for r in resultados:
+        if not r.get("ok"):
+            lineas.append(
+                f"• {html.escape(r['ticker'])}: {html.escape(r.get('motivo', 'Sin datos'))}"
+            )
+            continue
+
+        estado_corto = "ALERTA" if r.get("alerta") else "sin señal"
+        lineas.append(
+            f"• {html.escape(r['ticker'])}: ${r['precio']} | RSI {r['rsi']} | "
+            f"{html.escape(r['tendencia'])} | {html.escape(r['estructura'])} | {estado_corto}"
+        )
+
+    if sin_datos:
+        lineas.append("")
+        lineas.append(f"Sin datos/incompletos: {len(sin_datos)}")
+
+    return "\n".join(lineas)
 
 
 def backtest_activo(activo, capital_inicial=BACKTEST_INITIAL_CAPITAL):
@@ -741,10 +816,18 @@ def ejecutar_escaneo():
     print(f"Fuente de datos configurada: {FUENTE_DATOS}")
 
     llm = inicializar_llm()
+    resultados = []
 
     for activo in PORTAFOLIO:
-        evaluar_activo(activo, llm)
+        resumen = evaluar_activo(activo, llm)
+        if resumen:
+            resultados.append(resumen)
         time.sleep(2)
+
+    mensaje_resumen = construir_resumen_escaneo(resultados)
+    print("\n=== RESUMEN DEL ESCANEO ===")
+    print(mensaje_resumen)
+    enviar_telegram(mensaje_resumen)
 
     print("\n=== ESCANEO FINALIZADO ===")
 
